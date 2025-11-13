@@ -9,8 +9,8 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      # --- ÉTAPE 1 : MODIFIÉE AVEC LA CORRECTION AGGRESSIVE ---
-      - name: Configure Core RDP Settings (Aggressive Stop)
+      # --- ÉTAPE 1 : CORRIGÉE AVEC -Force ET L'ARRÊT DES DÉPENDANCES ---
+      - name: Configure Core RDP Settings
         shell: powershell
         run: |
           # Enable Remote Desktop and disable Network Level Authentication
@@ -28,18 +28,19 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # --- CORRECTION AGGRESSIVE ---
+          # --- DÉBUT DE LA CORRECTION ---
           # Force-stop dependent services first (especially the port redirector)
           Write-Host "Forcing stop of dependent services (UmRdpService, TermServLicensing)..."
           Stop-Service -Name "UmRdpService" -Force -ErrorAction SilentlyContinue
           Stop-Service -Name "TermServLicensing" -Force -ErrorAction SilentlyContinue
           
-          # Restart the Remote Desktop service
+          # Restart the Remote Desktop service WITH -Force
           Write-Host "Restarting TermService..."
           Restart-Service -Name TermService -Force
           Write-Host "Service Restarted."
+          # --- FIN DE LA CORRECTION ---
 
-      # --- ÉTAPE 2 : MODIFIÉE POUR L'AFFICHAGE DU MOT DE PASSE ---
+      # --- ÉTAPE 2 : CORRIGÉE POUR L'AFFICHAGE DU MOT DE PASSE ---
       - name: Create RDP User with Secure Password
         shell: powershell
         run: |
@@ -62,7 +63,6 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          # --- AMÉLIORATION APPLIQUÉE ---
           # Enregistrer uniquement le mot de passe pour un affichage propre
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
@@ -74,7 +74,6 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          # Vous pouvez changer la version si vous le souhaitez
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.72.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
@@ -85,10 +84,8 @@ jobs:
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -108,7 +105,6 @@ jobs:
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -116,19 +112,17 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      # --- ÉTAPE 6 : MODIFIÉE POUR L'AFFICHAGE DU MOT DE PASSE ---
+      # --- ÉTAPE 6 : CORRIGÉE POUR L'AFFICHAGE DU MOT DE PASSE ---
       - name: Maintain Connection
         shell: powershell
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          # --- AMÉLIORATION APPLIQUÉE ---
           # Utiliser la variable RDP_PASSWORD pour un affichage propre
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
