@@ -1,248 +1,118 @@
-name: Secure RDP with Tailscale
+name: RDP with Tailscale
 
 on:
   workflow_dispatch:
-    inputs:
-      session_duration:
-        description: 'Durée de la session (minutes)'
-        required: true
-        default: '3600'
-        type: choice
-        options:
-          - '120'
-          - '240'
-          - '360'
-          - '480'
-          - '720'
-
-env:
-  SESSION_DURATION: ${{ github.event.inputs.session_duration }}
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: ${{ env.SESSION_DURATION }}
+    timeout-minutes: 3600
 
     steps:
-      - name: Vérifier l'environnement
+      - name: Configure Core RDP Settings
         run: |
-          Write-Host "🔍 Vérification de l'environnement Windows..."
-          systeminfo | Select-String "OS Name", "OS Version"
-
-      - name: Configurer RDP de manière sécurisée
-        run: |
-          Write-Host "🛠️ Configuration de RDP..."
-          
-          # Activer RDP
+          Write-Host "🔧 Configuring RDP settings..."
+          # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
-          
-          # Pour la compatibilité, désactiver NLA temporairement
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
 
-          # Configurer le pare-feu
+          # Configure firewall
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389 `
-            description="Accès RDP via Tailscale"
+            dir=in action=allow protocol=TCP localport=3389
 
-          # Redémarrer les services RDP
-          Get-Service -Name "TermService" | Restart-Service -Force
-          Start-Service -Name "UmRdpService" -ErrorAction SilentlyContinue
+          # Restart RDP services
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP configured successfully"
 
-          Write-Host "✅ RDP configuré avec succès"
-
-      - name: Créer un utilisateur sécurisé
+      - name: Create RDP User with Secure Password
         run: |
-          Write-Host "👤 Création de l'utilisateur RDP..."
-          
-          # Générer un mot de passe robuste
-          $charTypes = @{
-              Majuscules = [char[]](65..90)      # A-Z
-              Minuscules = [char[]](97..122)     # a-z
-              Chiffres   = [char[]](48..57)      # 0-9
-              Speciaux   = [char[]](33,35,36,37,38,42,43,45,61,63,64) # !#$%&*+-=?@
+          Write-Host "👤 Creating RDP user..."
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
           }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          $motDePasse = @()
-          foreach ($type in $charTypes.GetEnumerator()) {
-              $motDePasse += $type.Value | Get-Random -Count 3
-          }
-          $motDePasse = -join ($motDePasse | Sort-Object { Get-Random })
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
           
-          # Créer l'utilisateur
-          $securePassword = ConvertTo-SecureString $motDePasse -AsPlainText -Force
-          New-LocalUser -Name "UtilisateurRDP" -Password $securePassword -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "UtilisateurRDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "UtilisateurRDP"
-          
-          # Vérifier la création
-          if (Get-LocalUser -Name "UtilisateurRDP" -ErrorAction SilentlyContinue) {
-              Write-Host "✅ Utilisateur créé avec succès"
-              echo "RDP_USER=UtilisateurRDP" >> $env:GITHUB_ENV
-              echo "RDP_PASSWORD=$motDePasse" >> $env:GITHUB_ENV
-          } else {
-              Write-Error "❌ Échec de la création de l'utilisateur"
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
               exit 1
           }
 
-      - name: Installer et configurer Tailscale
+      - name: Install Tailscale
         run: |
-          Write-Host "📡 Installation de Tailscale..."
+          Write-Host "📡 Installing Tailscale..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          # Télécharger Tailscale
-          $tailscaleURL = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale-$env:GITHUB_RUN_ID.msi"
-          
-          try {
-              Invoke-WebRequest -Uri $tailscaleURL -OutFile $installerPath
-              Write-Host "✅ Téléchargement réussi"
-          } catch {
-              Write-Error "❌ Échec du téléchargement de Tailscale"
-              exit 1
-          }
-
-          # Installer silencieusement
-          Start-Process msiexec.exe -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart") -Wait
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+          Write-Host "✅ Tailscale installed"
 
-          # Attendre que le service soit installé
-          $timeout = 0
-          while (-not (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") -and $timeout -lt 30) {
-              Start-Sleep -Seconds 2
-              $timeout++
-          }
-
-          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
-              Write-Host "✅ Tailscale installé avec succès"
-          } else {
-              Write-Error "❌ Échec de l'installation de Tailscale"
-              exit 1
-          }
-
-      - name: Établir la connexion Tailscale
+      - name: Establish Tailscale Connection
         run: |
-          Write-Host "🔗 Connexion à Tailscale..."
+          Write-Host "🔗 Connecting to Tailscale..."
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          if (-not ${{ secrets.TAILSCALE_AUTH_KEY }}) {
-              Write-Error "❌ Clé d'authentification Tailscale manquante"
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "✅ Tailscale IP: $tsIP"
 
-          # Configurer Tailscale
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname="github-runner-$env:GITHUB_RUN_ID" `
-            --accept-routes=false `
-            --ssh=false
-
-          # Obtenir l'IP Tailscale
-          $ipTailscale = $null
-          $tentatives = 0
-          do {
-              Start-Sleep -Seconds 3
-              $ipTailscale = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              $tentatives++
-              Write-Host "Tentative $tentatives/10 - IP: $ipTailscale"
-          } while (-not $ipTailscale -and $tentatives -lt 10)
-
-          if ($ipTailscale) {
-              echo "TAILSCALE_IP=$ipTailscale" >> $env:GITHUB_ENV
-              Write-Host "✅ Connecté à Tailscale - IP: $ipTailscale"
-          } else {
-              Write-Error "❌ Impossible d'obtenir une IP Tailscale"
-              exit 1
-          }
-
-      - name: Vérifier l'accessibilité RDP
+      - name: Verify RDP Accessibility
         run: |
-          Write-Host "🔍 Vérification de l'accessibilité RDP..."
-          
-          # Vérifier que le service RDP fonctionne
-          $serviceRDP = Get-Service -Name "TermService"
-          if ($serviceRDP.Status -ne "Running") {
-              Write-Error "❌ Le service RDP n'est pas en cours d'exécution"
+          Write-Host "🔍 Testing RDP connectivity..."
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
+          Write-Host "✅ TCP connectivity successful!"
 
-          # Tester la connectivité
-          $testConnexion = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          
-          if ($testConnexion.TcpTestSucceeded) {
-              Write-Host "✅ Connectivité RDP vérifiée sur $env:TAILSCALE_IP:3389"
-          } else {
-              Write-Warning "⚠️ La connexion TCP a échoué, mais le service continue"
-          }
-
-      - name: Afficher les informations de connexion
+      - name: Maintain Connection
         run: |
-          $delimiteur = "=" * 60
           Write-Host ""
-          Write-Host "🚀 $delimiteur"
-          Write-Host "   ACCÈS RDP SÉCURISÉ - READY"
-          Write-Host "   $delimiteur"
-          Write-Host "   🌐 Adresse: $env:TAILSCALE_IP"
-          Write-Host "   👤 Utilisateur: $env:RDP_USER"
-          Write-Host "   🔑 Mot de passe: $env:RDP_PASSWORD"
-          Write-Host "   ⏱️ Durée: $env:SESSION_DURATION minutes"
-          Write-Host "   $delimiteur"
-          Write-Host "   📋 Instructions:"
-          Write-Host "   1. Ouvrez le Bureau à distance (mstsc.exe)"
-          Write-Host "   2. Entrez l'adresse: $env:TAILSCALE_IP"
-          Write-Host "   3. Utilisez les identifiants ci-dessus"
-          Write-Host "   4. La session se terminera automatiquement"
-          Write-Host "   $delimiteur"
+          Write-Host "🚀 RDP ACCESS READY"
+          Write-Host "=================="
+          Write-Host "📍 Address: $env:TAILSCALE_IP"
+          Write-Host "👤 Username: RDP"
+          Write-Host "🔑 Password: $(echo $env:RDP_CREDS)"
+          Write-Host "=================="
           Write-Host ""
-
-      - name: Maintenir la session active
-        run: |
-          $debut = Get-Date
-          $dureeTotale = [int]$env:SESSION_DURATION
           
-          Write-Host "🕐 Session RDP démarrée à: $(Get-Date)"
-          Write-Host "⏳ Durée configurée: $dureeTotale minutes"
-          
+          # Keep runner active
           while ($true) {
-              $tempsEcoule = [int]((Get-Date) - $debut).TotalMinutes
-              $tempsRestant = $dureeTotale - $tempsEcoule
-              
-              if ($tempsRestant -le 0) {
-                  Write-Host "⏰ Session expirée - Arrêt automatique"
-                  break
-              }
-              
-              # Vérifier l'état de Tailscale périodiquement
-              if ($tempsEcoule % 5 -eq 0) {
-                  $statutTailscale = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
-                  if ($statutTailscale.BackendState -eq "Running") {
-                      Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ✅ Session active - $tempsRestant minutes restantes"
-                  } else {
-                      Write-Warning "⚠️ Problème de connexion Tailscale détecté"
-                  }
-              }
-              
-              Start-Sleep -Seconds 60
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
-
-      - name: Nettoyage final
-        if: always()
-        run: |
-          Write-Host "🧹 Nettoyage des ressources..."
-          
-          # Supprimer l'utilisateur
-          Remove-LocalUser -Name "UtilisateurRDP" -ErrorAction SilentlyContinue
-          
-          # Désactiver RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 1 -Force
-          
-          # Supprimer la règle firewall
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" -ErrorAction SilentlyContinue
-          
-          # Déconnecter Tailscale
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" down -ErrorAction SilentlyContinue
-          
-          Write-Host "✅ Nettoyage terminé - Environnement sécurisé"
