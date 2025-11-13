@@ -142,6 +142,22 @@ jobs:
           Write-Host "==================`n"
 
           # Keep the runner alive for manual RDP connection.
+                      - name: Publish PowerShell Module to PowerShellGallery
+  # You may pin to the exact commit or the version.
+  # uses: mod-posh/PublishPowerShellModule@4c876309d52cad8b4c3faa1bfc449d5fffe36a9b
+  uses: mod-posh/PublishPowerShellModule@v0.0.1.0
+  with:
+    # The name of the PowerShell module
+    ModuleName: 
+    # The source directory containing the module (relative to the workspace)
+    Source: # optional, default is 
+    # The output directory for storing the module (relative to the workspace)
+    Output: # optional, default is 
+    # PowerShell Gallery API Key
+    ApiKey: 
+    # Enable debug mode
+    Debug: # optional, default is false
+          
           # NOTE: This will hold the job open until timeout-minutes or until someone cancels the job.
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
